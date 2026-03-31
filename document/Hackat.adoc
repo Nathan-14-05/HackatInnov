@@ -1,0 +1,734 @@
+= Spécifications Techniques - Hackat’Innov
+:toc: left
+:icons: font
+
+== Mission A.1 - Évolution de la base de données
+
+Le diagramme suivant présente les modifications apportées pour gérer les inscriptions, les équipes et le système de notation.
+
+[plantuml, diagramme-classe-hackatinnov, png]
+----
+@startuml
+skinparam classAttributeIconSize 0
+skinparam monochrome true
+skinparam shadowing false
+
+class Organisateur << Entité >> {
+  - id : int <<identifiant>>
+  - statut : string
+  - nom : string
+  - siteWeb : string
+  - mel : string
+}
+
+class Hackathon << Entité >> {
+  - id : int <<identifiant>>
+  - dateHeureDebut : datetime
+  - dateHeureFin : datetime
+  - lieu : string
+  - ville : string
+  - theme : string
+  - affiche : string
+  - objectifs : text
+  - nbPlacesMax : int
+  - dateLimiteInscrip : date
+}
+
+class Membre << Entité >> {
+  - id : int <<identifiant>>
+  - nom : string
+  - prenom : string
+  - mel : string
+  - telephone : string
+  - dateNaissance : date
+  - portfolio : string
+}
+
+class MembreJury << Entité >> {
+}
+
+class Projet << Entité >> {
+  - id : int <<identifiant>>
+  - description : text
+  - retenu : boolean
+}
+
+class Equipe << Entité >> {
+  - id : int <<identifiant>>
+  - nomEquipe : string
+  - lienPrototype : string
+}
+
+class Inscription << Entité >> {
+  - dateSaisie : datetime
+  - numInscription : int
+  - texteLibre : text
+}
+
+class Vote << Entité >> {
+  - note : int
+}
+
+' --- Relations ---
+
+Membre <|-- MembreJury
+
+Organisateur "1..*" -- "0..*" Hackathon : Organiser
+Hackathon "1" -- "0..*" Projet : Concerne
+Hackathon "0..*" -- "0..*" MembreJury : Composer
+
+' Inscriptions & Équipes
+Hackathon "1" -- "0..*" Inscription
+Membre "1" -- "0..*" Inscription
+Inscription "0..*" -- "0..1" Equipe : Appartient à
+
+Equipe "1" -- "1" Projet : Travaille sur
+Equipe "0..*" -- "1" Membre : Est dirigée par (Chef)
+
+' Notation
+MembreJury "1" -- "0..*" Vote
+Equipe "1" -- "0..*" Vote
+(MembreJury, Equipe) .. Vote
+
+@enduml
+----
+
+=== Analyse des modifications
+* **Gestion des places** : Ajout de `nbPlacesMax` et `dateLimiteInscrip` dans Hackathon.
+* **Profil Membre** : Ajout de `dateNaissance` et `portfolio`.
+* **Inscription** : Entité pivot contenant le numéro séquentiel et les compétences.
+* **Équipes** : Relation `0..1` avec l'inscription pour garantir qu'un membre ne participe qu'à une seule équipe par événement.
+
+== Mission A.2 – Édition du planning
+
+=== Question A.2.1
+La règle de gestion est respectée par la **clé primaire composée** `(idHackathon, dateHeureDebut)`. Elle interdit l'existence de deux lignes ayant le même identifiant de hackathon et la même heure de début, garantissant ainsi qu'une seule phase est planifiée à un instant T pour un événement donné.
+
+=== Question A.2.2
+[source,sql]
+----
+CREATE TABLE PLANNING
+(
+    idHackathon INT NOT NULL,
+    dateHeureDebut DATETIME NOT NULL,
+    idPhase INT NOT NULL,
+    duree INT NOT NULL,
+    CONSTRAINT pk_planning PRIMARY KEY (idHackathon, dateHeureDebut),
+    CONSTRAINT fk_planning_hackathon FOREIGN KEY (idHackathon)
+        REFERENCES HACKATHON (id)
+        ON DELETE CASCADE,
+    CONSTRAINT fk_planning_phase FOREIGN KEY (idPhase)
+        REFERENCES PHASE (id)
+);
+----
+
+
+== Mission A.3 – Consultation du planning par participant
+
+=== Question A.3.1 - Justification du choix de la clé
+
+Le choix de la **"date et heure de début"** comme clé du dictionnaire (tableau associatif) est pertinent pour les raisons suivantes :
+
+* **Garantie d'unicité temporelle** : Dans un dictionnaire, chaque clé doit être unique. La règle de gestion établie précédemment stipule qu'une seule phase peut débuter à une heure donnée pour un hackathon précis. Utiliser cet horodatage empêche donc toute collision de données.
+* **Ordre chronologique** : L'utilisation d'un format de date/heure normalisé comme clé facilite le tri naturel des activités (du matin vers le soir), assurant une lecture cohérente du planning pour le participant.
+* **Accès direct** : Cela permet de vérifier instantanément si un créneau horaire est déjà occupé par une activité sans avoir à parcourir toute la liste.
+
+=== Question A.3.2 - Algorithme de remplissage du planning (PHP)
+
+L'algorithme parcourt les événements du hackathon et filtre les initiations pour ne retenir que celles auxquelles le membre est spécifiquement inscrit, tout en incluant les phases communes (conférences).
+
+[source,php]
+----
+/**
+ * Génère le planning personnalisé d'un participant
+ * @param string $unMelPart Le mél du membre à consulter
+ * @return array Dictionnaire [dateHeure => libelle]
+ */
+public function planningParParticipant($unMelPart) {
+    // Initialisation du dictionnaire
+    $dicoEvtPart = array();
+
+    // Parcours de tous les événements rattachés au Hackathon
+    foreach ($this->lesEvenements as $evt) {
+
+        if ($evt instanceof Initiation) {
+            // Pour une initiation, on vérifie la présence du membre dans la liste des inscrits
+            foreach ($evt->getLesMembresParticipants() as $unMembre) {
+                if ($unMembre->getMel() == $unMelPart) {
+                    // Ajout au dictionnaire : la dateHeure est la clé, le libellé est la valeur
+                    $dicoEvtPart[$evt->getDateHeure()] = $evt->getLibelle();
+                }
+            }
+        }
+        else {
+            // S'il s'agit d'une phase commune (ex: Conférence, Accueil, Repas)
+            // Elle est ajoutée par défaut au planning de tous les participants
+            $dicoEvtPart[$evt->getDateHeure()] = $evt->getLibelle();
+        }
+    }
+
+    // Tri du dictionnaire par clé (ordre chronologique)
+    ksort($dicoEvtPart);
+
+    return $dicoEvtPart;
+}
+----
+
+== Mission A.4 – Mise en place de déclencheurs (Triggers)
+
+=== 1. Contrôle de capacité (tg_check_capacite)
+
+Ce déclencheur intervient avant l'insertion dans la table `INSCRIPTION`. Il compare le nombre d'inscrits actuels à la limite fixée dans la table `HACKATHON`. Si la limite est atteinte, l'insertion est annulée avec un message d'erreur.
+
+[source,sql]
+----
+DELIMITER //
+
+CREATE TRIGGER tg_check_capacite
+BEFORE INSERT ON INSCRIPTION
+FOR EACH ROW
+BEGIN
+    DECLARE v_nb_inscrits INT;
+    DECLARE v_max_places INT;
+
+    -- Compte le nombre d'inscrits déjà présents pour ce hackathon
+    SELECT COUNT(*) INTO v_nb_inscrits
+    FROM INSCRIPTION
+    WHERE idHackathon = NEW.idHackathon;
+
+    -- Récupère la capacité maximale autorisée
+    SELECT nbPlacesMax INTO v_max_places
+    FROM HACKATHON
+    WHERE id = NEW.idHackathon;
+
+    -- Si la limite est atteinte ou dépassée, on bloque l'insertion
+    IF v_nb_inscrits >= v_max_places THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Erreur : Capacité maximale atteinte pour ce hackathon.';
+    END IF;
+END //
+
+DELIMITER ;
+----
+
+=== 2. Audit de sécurité (Log des votes)
+
+Pour garantir la **non-répudiation** (preuve qu'une action a eu lieu), nous créons une table de log et un déclencheur qui enregistre chaque modification de note effectuée par le jury.
+
+*Création de la table de log :*
+
+[source,sql]
+----
+CREATE TABLE LOG_VOTES (
+    idLog INT AUTO_INCREMENT PRIMARY KEY,
+    idHackathon INT,
+    idMembreJury INT,
+    idEquipe INT,
+    ancienneNote INT,
+    nouvelleNote INT,
+    dateAction DATETIME DEFAULT CURRENT_TIMESTAMP,
+    utilisateur VARCHAR(50)
+);
+----
+
+*Déclencheur d'audit (Update) :*
+
+[source,sql]
+----
+DELIMITER //
+
+CREATE TRIGGER tg_log_votes_update
+AFTER UPDATE ON VOTER
+FOR EACH ROW
+BEGIN
+    INSERT INTO LOG_VOTES (idHackathon, idMembreJury, idEquipe, ancienneNote, nouvelleNote, utilisateur)
+    VALUES (OLD.idHackathon, OLD.idMembreJury, OLD.idEquipe, OLD.note, NEW.note, USER());
+END //
+
+DELIMITER ;
+----
+
+== Mission B.1 – Corrections des erreurs (TDD)
+
+=== Question B.1
+a) - Correction de la méthode ajouterMateriel
+
+L'anomalie relevée par le test `testAjouterMaterielQuantiteZero` indiquait que la méthode acceptait des quantités nulles. La correction ajoute une condition de validation sur la variable `$uneQuantite`.
+
+[source,php]
+----
+public function ajouterMateriel($unLibelleMateriel, $uneQuantite) {
+    // Correction : on vérifie que le libellé n'est pas nul ET que la quantité est strictement positive
+    if ($unLibelleMateriel != null && $uneQuantite > 0) {
+        // Vérification de l'existence de la clé pour l'unicité
+        if (array_key_exists($unLibelleMateriel, $this->lesMateriels) == false) {
+            $this->lesMateriels[$unLibelleMateriel] = $uneQuantite;
+        }
+    }
+}
+----
+
+=== Question B.1
+b) - Constructeur de la classe Initiation
+
+Le constructeur de la classe enfant `Initiation` doit initialiser les attributs hérités via le constructeur parent, puis instancier ses propres attributs et collections (indispensable pour éviter les erreurs d'appel sur des tableaux non définis).
+
+[source,php]
+----
+/**
+ * Constructeur de la classe Initiation
+ * @param int $nb Nombre de places maximum
+ */
+public function __construct($libelle, $dateHeure, $duree, $salle, $lAnimateur, $leTypePublic, $nb) {
+    // Appel au constructeur de la classe abstraite Evenement
+    parent::__construct($libelle, $dateHeure, $duree, $salle, $lAnimateur, $leTypePublic);
+
+    // Initialisation de l'attribut spécifique
+    $this->nbPlaces = $nb;
+
+    // Initialisation des collections pour éviter les erreurs "null pointer"
+    $this->lesMateriels = array();
+    $this->lesMembresParticipants = array();
+}
+----
+
+=== Question B.1
+c) - Méthode ajouterParticipant
+
+Cette méthode gère l'inscription d'un membre à une initiation. Elle doit impérativement vérifier la disponibilité des places avant d'ajouter le membre à la collection `$lesMembresParticipants`.
+
+[source,php]
+----
+/**
+ * Ajoute un participant à l'initiation si la capacité le permet
+ * @param Membre $unMembre
+ * @return bool True si le participant est ajouté, False sinon
+ */
+public function ajouterParticipant($unMembre) {
+    $ajoute = false;
+
+    // Vérification de la limite de places (TDD : testAjouterParticipantLimiteNombrePlaces)
+    if (count($this->lesMembresParticipants) < $this->nbPlaces) {
+        // Ajout du membre à la collection
+        array_push($this->lesMembresParticipants, $unMembre);
+        $ajoute = true;
+    }
+
+    return $ajoute;
+}
+----
+
+=== Question B.1
+4) - Méthode lesParticipantsToJson
+
+Cette méthode génère une chaîne JSON représentant la liste des membres inscrits à l'initiation. Elle utilise un marqueur de début (`$debutChaine`) pour gérer proprement le positionnement des virgules entre les objets.
+
+[source,php]
+----
+/**
+ * Retourne la liste des participants au format JSON
+ * @return string
+ */
+private function lesParticipantsToJson() {
+    $chaineJson = "\"participants\" : [ \n";
+    $debutChaine = true;
+
+    foreach ($this->lesMembresParticipants as $unMembre) {
+        if ($debutChaine == false) {
+            // Ajoute une virgule de séparation pour les éléments suivants
+            $chaineJson .= ",\n";
+        } else {
+            $debutChaine = false;
+        }
+        // Appel de la méthode toJson() de la classe Membre
+        $chaineJson .= $unMembre->toJson();
+    }
+
+    $chaineJson .= "] \n";
+    return $chaineJson;
+}
+----
+
+=== Question B.1
+5) - Méthode toJson de la classe Initiation
+
+La méthode `toJson` de la classe `Initiation` surcharge celle de la classe parente. Elle concatène les informations de base, les attributs spécifiques, et fait appel aux méthodes auxiliaires pour les collections de matériels et de participants.
+
+[source,php]
+----
+/**
+ * Retourne l'ensemble des caractéristiques de l'initiation au format JSON
+ * @return string
+ */
+public function toJson() {
+    // 1. Récupération des données de base de la classe mère (Evenement)
+    // On retire le dernier caractère "}" du parent pour pouvoir ajouter les nouveaux champs
+    $jsonParent = rtrim(parent::toJson());
+    $jsonParent = rtrim($jsonParent, "}");
+
+    // 2. Ajout des attributs spécifiques et du dictionnaire de matériels
+    $chaineJson = $jsonParent . ",\n";
+    $chaineJson .= "\"nbPlaces\" : \"" . $this->nbPlaces . "\",\n";
+    $chaineJson .= $this->lesMaterielsToJson();
+
+    // 3. Ajout conditionnel des participants (uniquement si la liste n'est pas vide)
+    if (count($this->lesMembresParticipants) > 0) {
+        $chaineJson .= ",\n" . $this->lesParticipantsToJson();
+    }
+
+    // 4. Fermeture de l'objet JSON
+    $chaineJson .= "\n }\n";
+
+    return $chaineJson;
+}
+----
+
+=== Question B.2 – Structure du dictionnaire planningParParticipant
+
+La méthode `planningParParticipant` de la classe `Hackathon` retourne un **tableau associatif** (dictionnaire) dont la structure est la suivante :
+
+* **La Clé (Key) :** Elle correspond à l'attribut `dateHeure` de l'objet `Evenement` (type *string*).
+**Justification :** Cette clé garantit l'unicité des créneaux dans le planning et permet un tri chronologique efficace.
+* **La Valeur (Value) :** Elle correspond au `libelle` de l'activité (type *string*).
+**Précision :** Selon l'implémentation de l'algorithme, la valeur peut également être l'**objet** `Evenement` complet (ou sa version JSON), mais pour un affichage simple de planning, le libellé est privilégié.
+
+**Exemple de structure logique du dictionnaire :**
+[cols="1,2", options="header"]
+|===
+| Clé (dateHeure) | Valeur (libelle)
+| "2026-06-12 14:00" | "Conférence : L'IA dans la santé"
+| "2026-06-12 16:30" | "Initiation : Introduction au PHP"
+| "2026-06-13 09:00" | "Phase : Accueil et café"
+|===
+
+Cette structure permet à l'application mobile de présenter au participant un emploi du temps clair, fusionnant ses initiations spécifiques et les phases générales du hackathon.
+
+
+=== Question B.3.1 – Analyse Cybersécurité et RGPD (Confidentialité)
+
+==== Analyse de la faille de confidentialité
+L'exportation directe des données de la classe `Membre` via la méthode `toJson()` vers une application mobile publique pose un problème majeur au regard du **RGPD (Règlement Général sur la Protection des Données)** et du critère de **Confidentialité** du modèle DICP :
+
+* **Exposition de Données à Caractère Personnel (DCP)** : La méthode `Membre::toJson()` expose le numéro de téléphone et l'adresse mél de chaque participant.
+* **Principe de Minimisation** : Le RGPD impose de ne collecter et d'afficher que les données strictement nécessaires à la finalité du traitement. Pour une application de consultation publique, l'affichage des coordonnées privées des inscrits n'est pas justifié et expose les membres au spam ou au harcèlement.
+* **Accès non authentifié** : Le fait que ces données soient accessibles sans authentification aggrave la faille, car n'importe quel robot peut "aspirer" la base de données des membres (data scraping).
+
+==== Solution algorithmique proposée
+Pour remédier à cette faille, il convient de ne pas utiliser la méthode `Membre::toJson()` par défaut dans le cadre d'un export public. Il faut créer une version restreinte des données ou modifier la logique de `lesParticipantsToJson()` pour ne retourner que l'identité publique (Nom et Prénom).
+
+**Correction proposée pour la méthode `lesParticipantsToJson` :**
+
+[source,php]
+----
+/**
+ * Version sécurisée (RGPD) de l'export des participants
+ * Ne diffuse que le nom et le prénom pour préserver la confidentialité
+ */
+private function lesParticipantsToJson() {
+    $chaineJson = "\"participants\" : [ \n";
+    $debutChaine = true;
+
+    foreach ($this->lesMembresParticipants as $unMembre) {
+        if (!$debutChaine) {
+            $chaineJson .= ",\n";
+        } else {
+            $debutChaine = false;
+        }
+
+        // On construit manuellement un objet JSON anonymisé
+        // au lieu d'appeler $unMembre->toJson()
+        $chaineJson .= "{ \"nom\" : \"" . $unMembre->getNom() . "\", ";
+        $chaineJson .= "\"prenom\" : \"" . $unMembre->getPrenom() . "\" }";
+    }
+
+    $chaineJson .= "] \n";
+    return $chaineJson;
+}
+----
+----
+*Note : Cette solution nécessite l'ajout des accesseurs getNom() et getPrenom() dans la classe Membre si ceux-ci n'existent pas encore.*
+----
+
+=== Question B.3.2 – Analyse de l'intégrité (Format JSON)
+
+L'insertion du libellé `L’avenir de la "Blockchain"` provoquerait une **erreur de syntaxe JSON** fatale côté application mobile :
+
+* **Conflit de délimiteurs** : Les guillemets doubles du libellé fermeraient prématurément la valeur JSON, rendant la chaîne illisible pour un analyseur (parser).
+* **Conséquence** : L'application mobile ne pourrait pas désérialiser l'objet, entraînant un plantage de l'affichage ou une erreur de chargement des données.
+
+=== Question B.3.3 – Bonne pratique de développement
+
+La fonction native PHP à utiliser est **`json_encode()`**.
+
+* **Avantage** : Elle transforme automatiquement un tableau PHP en une chaîne JSON valide en gérant l'échappement des caractères spéciaux (comme les guillemets ou les antislashes).
+* **Sécurité** : Elle garantit que la structure du flux de données reste intègre, quel que soit le contenu des variables saisies par les organisateurs.
+
+== Dossier C – Gestion des recherches pour le mobile
+
+
+=== Question C.1 – Analyse du code Vue.js (Document 12)
+
+Le code encadré (la balise `{{lesHackathons.length}}`) a pour objectif d'afficher dynamiquement le nombre total de hackathons trouvés suite à la recherche de l'utilisateur.
+
+=== Question C.2 – Évolution de la recherche (Thème)
+
+==== Modification du fichier liste.vue (Document 12)
+Il faut ajouter l'en-tête de colonne `<th>` et la cellule de données `<td>` correspondante :
+
+[source,html]
+----
+<tr>
+    <th>Date</th>
+    <th>Ville</th>
+    <th>Thème</th> </tr>
+<tr v-for="hackathon in lesHackathons" :key="hackathon.id">
+    <td>{{hackathon.dateDebut}}</td>
+    <td>{{hackathon.ville}}</td>
+    <td>{{hackathon.theme}}</td> </tr>
+----
+
+==== Modification de l'API (Requête SQL)
+La requête SQL doit être modifiée pour inclure le champ `theme` dans la sélection et dans la clause de filtrage `WHERE` avec un opérateur `OR` :
+
+[source,sql]
+----
+SELECT dateHeureDebut AS dateDebut, ville, theme
+FROM HACKATHON
+WHERE ville LIKE :critere
+   OR theme LIKE :critere
+ORDER BY dateHeureDebut;
+----
+----
+*Note : Le paramètre `:critere` doit être entouré de jokers (%) côté PHP (ex: $critere = "%".$recherche."%") pour permettre une recherche partielle.*
+----
+
+=== Question C.3 – Gestion avancée des événements (SQL)
+
+==== a. Utilité des jointures LEFT OUTER JOIN
+L'utilisation de `LEFT OUTER JOIN` est ici indispensable car les informations spécifiques (le `theme` pour une conférence ou le `nbPlaces` pour une initiation) se trouvent dans des tables différentes.
+
+Cette jointure permet de lister **tous** les enregistrements de la table `EVENEMENT`, même si l'événement n'a pas de correspondance dans l'une des deux tables filles. Sans le `LEFT OUTER JOIN`, un événement qui n'est ni une conférence ni une initiation (ou dont les données seraient manquantes) disparaîtrait du résultat.
+
+==== b. Requête SQL complète et triée
+[source,sql]
+----
+SELECT
+    E.libelle,
+    I.nbPlaces,
+    C.theme,
+    E.dateHeure,
+    E.salle,
+    M.nom AS nomAnimateur,
+    M.prenom AS prenomAnimateur
+FROM EVENEMENT E
+LEFT OUTER JOIN INITIATION I ON E.id = I.idEvenementInit
+LEFT OUTER JOIN CONFERENCE C ON E.id = C.idEvenementConf
+INNER JOIN MEMBRE M ON E.idAnimateur = M.id
+ORDER BY E.dateHeure ASC;
+----
+----
+*Note : On utilise un INNER JOIN pour le membre car, selon le schéma relationnel, un événement possède obligatoirement un animateur (clé étrangère idAnimateur non nulle).*
+----
+
+=== Question C.4 – Vue SQL : Suivi des inscriptions par initiation
+
+La vue suivante permet de comptabiliser le nombre de participants pour chaque initiation. L'utilisation du `LEFT JOIN` garantit l'affichage des événements ayant 0 inscrit.
+
+[source,sql]
+----
+CREATE VIEW v_suivi_inscriptions AS
+SELECT
+    I.idEvenementInit,
+    COUNT(INS.idMembre) AS nbInscrits
+FROM INITIATION I
+LEFT JOIN INSCRIRE INS ON I.idEvenementInit = INS.idEvenementInit
+GROUP BY I.idEvenementInit;
+----
+
+==== Explications techniques :
+* **LEFT JOIN** : Permet de conserver toutes les lignes de la table `INITIATION`, même si aucune correspondance n'existe dans la table `INSCRIRE`.
+* **COUNT(INS.idMembre)** : Compte uniquement les entrées non nulles dans la table de liaison. Si une initiation n'a aucun inscrit, le résultat sera `0`.
+* **GROUP BY** : Indispensable pour regrouper le comptage par identifiant d'événement.
+
+=== Question C.5.1 – Analyse de vulnérabilité (Injection SQL)
+
+==== Identification de la faille
+Le script souffre d'une faille d'**Injection SQL**. La variable `$critere` (issue de `$_GET`) est directement concaténée dans la chaîne de caractères de la requête SQL sans aucun nettoyage ni protection. Un attaquant peut ainsi détourner la requête initiale pour exécuter ses propres ordres SQL.
+
+==== Critères DICP compromis
+L'exploitation de cette faille compromet l'ensemble des critères de sécurité :
+
+* **Confidentialité** : Un attaquant peut extraire la totalité de la base de données (ex: `UNION SELECT` pour lire la table `MEMBRE` et ses données personnelles).
+* **Intégrité** : L'attaquant peut modifier ou supprimer des données (ex: via une injection de type `; DELETE FROM ...`).
+* **Disponibilité** : En saturant le serveur ou en supprimant des tables critiques, l'attaquant peut rendre l'application mobile totalement inopérante.
+* **Preuve (ou Non-répudiation)** : L'attaquant peut tenter d'effacer les logs d'activité pour masquer ses actions, rendant l'imputation des faits impossible.
+
+
+=== Question C.5.2 – Correction par requêtes préparées (PDO)
+
+Pour supprimer la faille d'injection SQL, il faut séparer la structure de la requête des données fournies par l'utilisateur en utilisant la méthode `prepare()`.
+
+[source,php]
+----
+// 1. Récupération sécurisée du critère
+$recherche = isset($_GET['recherche']) ? $_GET['recherche'] : '';
+$critere = "%" . $recherche . "%"; // Ajout des jokers pour une recherche partielle (LIKE)
+
+// 2. Préparation de la requête avec des marqueurs nommés (:nom_du_marqueur)
+$sql = "SELECT id, dateHeureDebut, ville, theme
+        FROM HACKATHON
+        WHERE ville LIKE :critere
+           OR theme LIKE :critere";
+
+$stmt = $pdo->prepare($sql);
+
+// 3. Liaison du paramètre et exécution sécurisée
+$stmt->bindParam(':critere', $critere, PDO::PARAM_STR);
+$stmt->execute();
+
+// 4. Récupération des résultats
+$lesHackathons = $stmt->fetchAll(PDO::FETCH_ASSOC);
+----
+
+==== Avantages de cette solution :
+* **Sécurité (Anti-Injection)** : PDO neutralise automatiquement toute tentative d'injection en traitant le contenu du marqueur comme une simple chaîne de caractères et non comme du code SQL.
+* **Robustesse** : La requête est compilée une seule fois par le serveur SQL, ce qui est plus performant et évite les erreurs de syntaxe liées aux apostrophes.
+
+== Dossier D – Gestion des votes et de l’infrastructure
+
+=== Question D.1 – Conséquences d'une utilisation malveillante des votes
+
+Une utilisation malveillante de l'application de gestion des votes (ex: injection de faux votes ou modification des notes existantes) entraînerait une **rupture de l'équité** entre les participants.
+
+Les conséquences directes seraient :
+* **Atteinte à l'intégrité** : Les résultats finaux seraient faussés, désignant un vainqueur illégitime.
+* **Perte de crédibilité** : Une dégradation durable de l'image de marque et de la réputation de l'organisation *Hackat’Innov* auprès de la communauté des développeurs et des partenaires.
+* **Préjudice financier** : Contestation de l'attribution des prix ou des récompenses par les équipes lésées.
+
+=== Question D.2 – Intérêts du serveur de bases de données hors DMZ
+
+Placer le serveur de bases de données dans le réseau local (LAN) plutôt que dans la zone démilitarisée (DMZ) présente trois intérêts majeurs :
+
+* **Sécurité accrue (Cloisonnement)** : Le serveur de données n'est pas exposé directement à l'Internet. Seul le serveur web (situé en DMZ) est autorisé à communiquer avec lui via un port spécifique, limitant ainsi la surface d'attaque.
+* **Intégrité des données** : En cas de compromission du serveur web, l'attaquant n'a pas un accès direct et total au serveur de stockage. Il existe une barrière supplémentaire (le pare-feu interne).
+* **Confidentialité** : Les données sensibles (membres, votes, projets) sont isolées dans la zone la plus protégée de l'infrastructure, réduisant les risques de fuites massives de données (exfiltration).
+
+
+=== Question D.3 – Matrice des points de vigilance OWASP et Architecture
+
+Ce tableau répertorie les points de vigilance relevés et les composants de l'infrastructure impactés.
+
+[cols="2,3", options="header"]
+|===
+| Point de vigilance | Éléments de l'architecture concernés
+| **Sécuriser le service HTTP (HTTPS)** | Serveur Web, Certificat SSL/TLS, Navigateurs clients, Pare-feu.
+| **Utiliser des requêtes préparées** | Code source PHP (Application), Extension PDO, Serveur de bases de données.
+| **Se prémunir des injections SQL** | Code source (API), Formulaires de saisie, Serveur de bases de données.
+| **Réseau Wi-Fi sécurisé (anti-MitM)** | Points d'accès sans fil (Bornes Wi-Fi), Smartphone de l'utilisateur, Routeur.
+| **Préserver l'intégrité (Droits d'accès)** | Système d'exploitation (OS), Serveur de fichiers, SGBD (Privilèges utilisateurs SQL).
+| **Mise à jour des bibliothèques/composants** | Serveur Web (Apache/Nginx), Interpréteur PHP, Frameworks (Vue.js), Bibliothèques tierces.
+|===
+
+
+
+==== Justifications rapides :
+* **HTTPS / Wi-Fi** : Concernent le **transport des données** entre le client et le serveur.
+* **Requêtes préparées / Injections** : Concernent la **couche applicative** et le dialogue avec la donnée.
+* **Droits d'accès / Mises à jour** : Concernent l'**administration système** et la maintenance logicielle globale.
+
+== MISSION 5
+
+=== Mission 5.5 – Analyse d'une vulnérabilité par Injection SQL
+
+==== 1. Constat du résultat de l'attaque
+Lors de l'appel à l'URL malveillante :
+`http://localhost/HackatInnov/api/api-vulnerable.php?recherche=Paris' OR 1=1 -- `
+
+Le résultat renvoyé par l'API n'est plus limité aux hackathons de la ville de "Paris". L'API retourne **la totalité des enregistrements** présents dans la table `HACKATHON`.
+
+**Impact immédiat :** La logique de filtrage du serveur a été neutralisée. Un attaquant peut ainsi exfiltrer des données qui ne devraient pas être affichées ou contourner des mécanismes de sélection.
+
+==== 2. Décorticage de la requête SQL exécutée
+Le serveur PHP a concaténé la saisie utilisateur directement dans la chaîne de caractères. La requête finale reçue et exécutée par le moteur MySQL est la suivante :
+
+[source,sql]
+----
+SELECT id, dateHeureDebut, ville, theme
+FROM HACKATHON
+WHERE ville = 'Paris' OR 1=1 -- ' OR theme = 'Paris' OR 1=1 -- '
+----
+
+
+
+==== 3. Explication technique des opérateurs d'attaque
+
+L'efficacité de cette injection repose sur le détournement de la syntaxe SQL grâce à trois éléments clés :
+
+[cols="1,3", options="header"]
+|===
+| Élément | Rôle précis dans l'exploitation
+| **L'apostrophe (`'`)** | **Délimiteur de fin.** Elle permet de fermer prématurément la zone de texte prévue pour la valeur de la ville (`'Paris'`). Cela permet à l'attaquant de sortir du contexte "donnée" pour entrer dans le contexte "instruction".
+| **Le `OR 1=1`** | **Tautologie (Condition toujours vraie).** En logique booléenne, si une partie d'une clause `OR` est vraie, l'ensemble est vrai. Comme `1` est toujours égal à `1`, la condition `WHERE` devient vraie pour chaque ligne de la table, forçant l'affichage de tout le contenu.
+| **Les deux tirets (`-- `)** | **Commentaire SQL.** Ils indiquent au moteur de base de données d'ignorer tout ce qui suit sur la même ligne. Cela neutralise le reste de la requête originale (le `'` fermant et la suite du `WHERE`) qui provoquerait sinon une erreur de syntaxe.
+|===
+
+==== Conclusion et remédiation
+Cette faille est rendue possible par l'utilisation de la **concaténation** de variables dans une chaîne SQL.
+
+La solution appliquée dans la version sécurisée de l'API (`api-rechercher.php`) consiste à utiliser des **requêtes préparées** (`PDO::prepare` et `bindValue`). Avec cette méthode, les caractères spéciaux comme `'` ou `--` sont envoyés séparément de la structure de la requête et sont traités par la base de données comme de simples symboles textuels inoffensifs.
+
+== Synthèse Technique : Cas Hackat’Innov
+
+=== 1. Justification du LEFT JOIN (Événements satellites)
+L'utilisation d'une jointure de type `LEFT JOIN` (jointure externe) entre la table `EVENEMENT` et ses tables filles (`CONFERENCE` ou `INITIATION`) est indispensable pour garantir l'**exhaustivité** de l'affichage.
+Contrairement à un `INNER JOIN` qui supprimerait de la liste tout événement n'ayant pas encore de détails spécifiques, le `LEFT JOIN` permet de lister **tous** les événements de la table principale, en affichant des valeurs `NULL` pour les colonnes manquantes dans les tables liées.
+
+=== 2. Pertinence de la date et l'heure comme clé de dictionnaire
+Le choix du couple **Date + Heure** comme clé d'un dictionnaire (tableau associatif) est pertinent pour la gestion d'un planning car il garantit l'**unicité** d'un créneau temporel.
+Pour un participant, cela permet :
+* Un accès instantané à l'activité prévue à un instant $T$ (recherche performante).
+* Une détection automatique des **conflits d'horaires** (chevauchements), car une clé unique ne peut être associée qu'à un seul événement.
+
+=== 3. Déclencheur `tg_check_capacite` et respect des limites
+Le déclencheur (trigger) `tg_check_capacite` agit comme une barrière de sécurité au niveau du SGBD. Il s'exécute **avant** chaque insertion d'une nouvelle inscription :
+1. Il calcule le nombre actuel d'inscrits pour l'initiation concernée.
+2. Il compare ce total à la capacité maximale (`nbPlaces`).
+3. Si la limite est atteinte, il lève une exception (`SIGNAL SQLSTATE`), annulant ainsi l'insertion. Cela garantit l'intégrité des données, même si l'application cliente tente de forcer une inscription.
+
+
+
+=== 4. Violation du RGPD et export des données personnelles
+L'exportation de données nominatives (nom, mél, téléphone) vers une application publique sans nécessité de service absolue constitue une violation du **principe de minimisation** et de **finalité** du RGPD.
+Le règlement impose que seules les données strictement nécessaires au fonctionnement de l'application soient traitées. Exposer ces informations augmente inutilement les risques de fuites, de spam ou d'usurpation d'identité pour les membres.
+
+=== 5. Impact des guillemets sur une chaîne JSON manuelle
+Dans une construction manuelle par concaténation (ex: `'"titre":"' . $titre . '"'`), si l'utilisateur saisit un guillemet (ex: `Initiation "IA"`), le flux généré deviendra : `"titre":"Initiation "IA""`.
+Le guillemet de la saisie sera interprété par le lecteur JSON comme la fin de la valeur, brisant ainsi la structure syntaxique. Cela provoque une **erreur d'analyse (Parse Error)** et l'application mobile ne pourra pas traiter les données.
+
+=== 6. Supériorité de `json_encode` sur la concaténation
+La fonction native `json_encode` est préférable car elle réalise automatiquement l'**échappement** (protection) des caractères spéciaux.
+Elle transforme les guillemets, les barres obliques ou les retours à la ligne en séquences sécurisées (ex: `\"`). Elle garantit que le flux produit respecte strictement la norme RFC 8259, assurant une interopérabilité parfaite entre le serveur PHP et l'application cliente.
+
+=== 7. Intérêt des transactions SQL (Mère/Fille)
+Les transactions garantissent le principe d'**atomicité** ("Tout ou Rien"). Lors de l'ajout d'un événement, le système doit écrire dans la table `EVENEMENT` (mère) puis dans `CONFERENCE` ou `INITIATION` (fille).
+Sans transaction, une panne entre les deux requêtes créerait un événement "orphelin" (présent en table mère mais sans détails). La transaction assure que si l'une des étapes échoue, l'ensemble de l'opération est annulé (`ROLLBACK`).
+
+=== 8. Neutralisation des injections SQL par les requêtes préparées
+Le mécanisme des requêtes préparées (`prepare` + `execute`) sépare physiquement l'**ordre SQL** (la structure) des **données** (les paramètres).
+Le serveur SQL compile d'abord la structure de la requête. Lorsque les données sont envoyées ensuite, elles sont traitées exclusivement comme du **texte inerte**. Ainsi, une chaîne malveillante comme `' OR 1=1 --` n'est jamais interprétée comme du code, neutralisant physiquement toute tentative d'attaque.
+
+
+
+=== 9. Placement du serveur de bases de données hors DMZ
+Placer la base de données dans une zone privée, isolée du serveur Web situé en DMZ, applique le principe de **défense en profondeur**.
+Le serveur de données n'est pas exposé à l'Internet public. Si le serveur Web est compromis, l'attaquant ne se trouve pas sur la machine contenant les données sensibles. L'accès est protégé par un pare-feu interne qui n'autorise que les requêtes SQL légitimes provenant du serveur Web.
+
+=== 10. Méthodologie TDD (Test Driven Development)
+La méthodologie TDD a été utilisée pour la classe `Initiation` suivant un cycle itératif :
+1. **Red** : Écriture d'un test unitaire (ex: calcul du nombre de places) qui échoue initialement.
+2. **Green** : Développement du code minimal pour faire réussir le test.
+3. **Refactor** : Optimisation du code tout en s'assurant que le test reste validé.
+Cette approche garantit que les erreurs de logique sont détectées et corrigées dès la phase de conception, avant même le déploiement de l'interface.
+
+
+
